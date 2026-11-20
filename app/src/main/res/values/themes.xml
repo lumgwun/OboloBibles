@@ -1,0 +1,4 @@
+<resources>
+
+    <style name="Theme.LocalLanguageBibles" parent="Theme.MaterialComponents.Light" />
+</resources>
