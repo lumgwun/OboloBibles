@@ -105,26 +105,38 @@ object OboloBibleParser {
             val bytes = stream.readBytes()
             stream.close()
 
-            when (folderName) {
-                "sab_protestant" -> c.initMobile(bytes, bytes.size)
-                "sab_catholic" -> k.initMobile(bytes, bytes.size)
-                else -> {
-                    // Try catholic decrypt first, fallback to protestant or raw string
-                    try {
-                        k.initMobile(bytes, bytes.size)
-                    } catch (e: Throwable) {
-                        try {
-                            c.initMobile(bytes, bytes.size)
-                        } catch (e2: Throwable) {
-                            // Raw bytes
-                        }
-                    }
-                }
+            val bytesForK = bytes.clone()
+            val bytesForC = bytes.clone()
+
+            // 1. Try Catholic decryption (fntmangr_cath)
+            try {
+                k.initMobile(bytesForK, bytesForK.size)
+                val candK = String(bytesForK, Charsets.UTF_8)
+                if (isValidText(candK)) return candK
+            } catch (t: Throwable) {
+                // Ignore
             }
-            String(bytes, Charsets.UTF_8)
+
+            // 2. Try Protestant decryption (fntmangr_prot)
+            try {
+                c.initMobile(bytesForC, bytesForC.size)
+                val candC = String(bytesForC, Charsets.UTF_8)
+                if (isValidText(candC)) return candC
+            } catch (t: Throwable) {
+                // Ignore
+            }
+
+            // 3. Fallback to raw UTF-8 string
+            val raw = String(bytes, Charsets.UTF_8)
+            if (isValidText(raw)) raw else null
         } catch (e: Exception) {
             null
         }
+    }
+
+    private fun isValidText(text: String): Boolean {
+        return text.contains("\\id") || text.contains("\\c ") || text.contains("\\v ") ||
+               text.contains("class=\"v") || text.contains("<html") || text.contains("id=")
     }
 
     private fun parseContent(
@@ -137,23 +149,23 @@ object OboloBibleParser {
             var bookCode = ""
             var chapter = 1
 
-            // USFM \id BOOK
-            val idMatch = Pattern.compile("\\\\id\\s+([A-Z0-9]{3})").matcher(content)
+            // Extract USFM \id BOOK
+            val idMatch = Pattern.compile("\\\\id\\s+([A-Z0-9]{3})", Pattern.CASE_INSENSITIVE).matcher(content)
             if (idMatch.find()) {
-                bookCode = idMatch.group(1) ?: ""
+                bookCode = idMatch.group(1)?.uppercase() ?: ""
             }
 
-            // USFM \c N
-            val cMatch = Pattern.compile("\\\\c\\s+(\\d+)").matcher(content)
+            // Extract USFM \c N
+            val cMatch = Pattern.compile("\\\\c\\s+(\\d+)", Pattern.CASE_INSENSITIVE).matcher(content)
             if (cMatch.find()) {
                 chapter = cMatch.group(1)?.toIntOrNull() ?: 1
             }
 
-            // HTML metadata fallback
+            // HTML metadata fallback: id="MAT_1" or id="MAT-1"
             if (bookCode.isBlank()) {
-                val htmlMetaMatch = Pattern.compile("id=\"([A-Z0-9]{3})[_-](\\d+)\"").matcher(content)
+                val htmlMetaMatch = Pattern.compile("id=\"([A-Z0-9]{3})[_-]?(\\d+)\"", Pattern.CASE_INSENSITIVE).matcher(content)
                 if (htmlMetaMatch.find()) {
-                    bookCode = htmlMetaMatch.group(1) ?: ""
+                    bookCode = htmlMetaMatch.group(1)?.uppercase() ?: ""
                     chapter = htmlMetaMatch.group(2)?.toIntOrNull() ?: 1
                 }
             }
@@ -165,34 +177,51 @@ object OboloBibleParser {
             val testament = bookPair?.second ?: "NT"
 
             // USFM verse parser: \v N verse text
-            val usfmVerseMatcher = Pattern.compile("\\\\v\\s+(\\d+)\\s+([^\\\\<]+)").matcher(content)
-            while (usfmVerseMatcher.find()) {
-                val vNum = usfmVerseMatcher.group(1)?.toIntOrNull() ?: continue
-                val vText = usfmVerseMatcher.group(2)?.trim() ?: continue
-                val cleaned = cleanVerseText(vText)
-                if (cleaned.isNotBlank()) {
-                    verses.add(
-                        BibleEntity(
-                            translationKey = translationKey,
-                            translationName = translationName,
-                            bookCode = bookCode,
-                            bookName = bookName,
-                            testament = testament,
-                            chapter = chapter,
-                            verse = vNum,
-                            text = cleaned
+            if (content.contains("\\v ")) {
+                val usfmVerseMatcher = Pattern.compile("\\\\v\\s+(\\d+)\\s+([^\\\\<]+)").matcher(content)
+                while (usfmVerseMatcher.find()) {
+                    val vNum = usfmVerseMatcher.group(1)?.toIntOrNull() ?: continue
+                    val vText = usfmVerseMatcher.group(2) ?: continue
+                    val cleaned = cleanVerseText(vText)
+                    if (cleaned.isNotBlank()) {
+                        verses.add(
+                            BibleEntity(
+                                translationKey = translationKey,
+                                translationName = translationName,
+                                bookCode = bookCode,
+                                bookName = bookName,
+                                testament = testament,
+                                chapter = chapter,
+                                verse = vNum,
+                                text = cleaned
+                            )
                         )
-                    )
+                    }
                 }
             }
 
-            // HTML verse parser: class="v">N</span> text
-            if (verses.isEmpty()) {
-                val htmlVerseMatcher = Pattern.compile("class=\"v(?:n)?\">(\\d+)</span>\\s*([^<]+)").matcher(content)
-                while (htmlVerseMatcher.find()) {
-                    val vNum = htmlVerseMatcher.group(1)?.toIntOrNull() ?: continue
-                    val vText = htmlVerseMatcher.group(2)?.trim() ?: continue
-                    val cleaned = cleanVerseText(vText)
+            // HTML verse parser with HTML-slice stripping
+            if (verses.isEmpty() && (content.contains("class=\"v") || content.contains("class=\"vn"))) {
+                val versePattern = Pattern.compile("<span\\s+class=\"v(?:n)?\">(\\d+)</span>", Pattern.CASE_INSENSITIVE)
+                val matcher = versePattern.matcher(content)
+
+                val verseSpans = mutableListOf<Pair<Int, Int>>()
+                while (matcher.find()) {
+                    val vNum = matcher.group(1)?.toIntOrNull() ?: continue
+                    val endIndex = matcher.end()
+                    verseSpans.add(Pair(vNum, endIndex))
+                }
+
+                for (i in verseSpans.indices) {
+                    val vNum = verseSpans[i].first
+                    val startIndex = verseSpans[i].second
+                    val nextStartIndex = if (i + 1 < verseSpans.size) verseSpans[i + 1].second - 25 else content.length
+                    val rawSlice = content.substring(startIndex, nextStartIndex.coerceAtMost(content.length))
+
+                    val stopIndex = rawSlice.indexOf("<div class=\"chapter\"")
+                    val validSlice = if (stopIndex > 0) rawSlice.substring(0, stopIndex) else rawSlice
+
+                    val cleaned = cleanVerseText(validSlice)
                     if (cleaned.isNotBlank()) {
                         verses.add(
                             BibleEntity(
@@ -221,9 +250,12 @@ object OboloBibleParser {
             .replace("&amp;", "&")
             .replace("&lt;", "<")
             .replace("&gt;", ">")
-            .replace("<[^>]*>".toRegex(), "") // Strip any residual html tags
-            .replace("\\\\f.*?\\\\f\\*".toRegex(), "") // Strip footnotes
-            .replace("\\\\x.*?\\\\x\\*".toRegex(), "") // Strip cross references
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("<[^>]*>".toRegex(), "") // Strip all HTML tags
+            .replace("\\\\f.*?\\\\f\\*".toRegex(), "") // Strip USFM footnotes
+            .replace("\\\\x.*?\\\\x\\*".toRegex(), "") // Strip USFM cross references
+            .replace("\\\\.*?\\s".toRegex(), "") // Strip any residual USFM tags
             .replace("\\s+".toRegex(), " ")
             .trim()
     }

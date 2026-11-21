@@ -9,7 +9,7 @@ import com.lsg.obolobibles.data.model.BookmarkEntity
 
 @Database(
     entities = [BibleEntity::class, BookmarkEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class OboloBibleDatabase : RoomDatabase() {
@@ -26,7 +26,9 @@ abstract class OboloBibleDatabase : RoomDatabase() {
                     context.applicationContext,
                     OboloBibleDatabase::class.java,
                     "obolo_bibles_db"
-                ).build()
+                )
+                .fallbackToDestructiveMigration(true)
+                .build()
                 INSTANCE = instance
                 instance
             }
